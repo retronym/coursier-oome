@@ -1,168 +1,148 @@
-# `cs resolve --reverse-tree` / `showMvnDepsTree --inverse` OOM repro
+# `cs resolve --reverse-tree` OOM repro
 
-Reproduces the `OutOfMemoryError` reported in
-[com-lihaoyi/mill#6823](https://github.com/com-lihaoyi/mill/issues/6823)
-when running `mill <module>.showMvnDepsTree --inverse`, and traces it to a
-regression in **coursier 2.1.17** in the BOM support.
+## Executive summary
+
+`cs resolve --reverse-tree` (and Mill's `showMvnDepsTree --inverse`) throws
+`OutOfMemoryError` on dependency sets that are large but not unusually so.
+The bug is a **regression introduced in coursier 2.1.17** by the BOM support
+PRs ([#3097](https://github.com/coursier/coursier/pull/3097),
+[#3143](https://github.com/coursier/coursier/pull/3143)).
+
+The BOM changes restructure the dependency graph in a way that dramatically
+increases the fan-out of the `dependees` map used to build the reverse tree.
+`Tree.recursivePrint` uses only a path-local `ancestors` set for cycle
+detection — it re-expands every node each time it is reached via a different
+branch. With higher fan-out this produces an exponentially large tree that
+exhausts the heap before a single line is written to output.
+
+Counterintuitively, the BOM changes make the **forward** tree *smaller* (via
+better version deduplication) while making the **reverse** tree blow up.
+
+| Version | Forward tree | Reverse tree |
+|---------|-------------|--------------|
+| ≤ 2.1.16 | 115,314 lines | 36,724 lines — completes |
+| 2.1.17+ | 51,636 lines | OOM before completion |
+
+The fix belongs in coursier: `Tree.recursivePrint` needs a global visited set
+(not just a path-local one) so nodes reached via multiple branches are printed
+once with an elision marker rather than re-expanded.
+
+---
 
 ## Reproducing
 
-### Via the coursier CLI (`repro-cs.sh`)
-
-The bug lives in coursier's `Tree.recursivePrint`, so it is reproducible
-without Mill. `repro-cs.sh` uses the JAR-based coursier launcher (required
-because the native `cs` binary does not honour `_JAVA_OPTIONS`):
+### Quick start
 
 ```bash
 # Download the JAR-based launcher (one-time, ~25 kB)
 curl -fLo coursier https://github.com/coursier/launchers/raw/master/coursier
 
-./repro-cs.sh        # runs forward tree then reverse tree; OOMs with -Xmx1g
+./repro-cs.sh        # forward tree line count, then reverse tree → OOM
 ```
 
-### With a specific coursier version (`repro-with-version.sh`)
+The native `cs` binary ignores `_JAVA_OPTIONS`, so the JAR launcher is
+required to cap the heap.
 
-Downloads the given release JAR to `.coursier-jars/` (cached) and runs the
-reverse-tree repro with `-Xmx1g -XX:GCTimeLimit=40` for a faster, cleaner
-failure and a GC log (`gc-<version>.log`):
+### Testing a specific coursier version
 
 ```bash
 ./repro-with-version.sh 2.1.25-M25   # FAIL — exit 3 (ExitOnOutOfMemoryError)
 ./repro-with-version.sh 2.1.16       # PASS
 ```
 
-The GC log shows the heap pressure leading up to failure:
+Downloads the release JAR to `.coursier-jars/` (cached). Runs with
+`-Xmx1g -XX:+ExitOnOutOfMemoryError -XX:GCTimeLimit=40`; GC events stream to
+stderr so the pressure profile is visible before the crash:
 
 ```
 [4.523s] GC(91) Concurrent Mark Cycle
 [4.535s] GC(92) Pause Young (Normal) (G1 Evacuation Pause) 996M->950M(1024M) 1.537ms
 ...
-[4.916s] GC(106) Pause Full (G1 Compaction Pause) 1019M->980M(1024M) 69.351ms
 [5.037s] GC(107) Pause Full (G1 Compaction Pause) 980M->979M(1024M) 120.958ms
 [5.037s] GC Overhead Limit exceeded too often (5).
 ```
 
-### Via Mill (`build.mill`)
+---
 
-```
-mill cloud.vaadin.showMvnDepsTree --inverse
-```
+## Regression analysis
 
-`.mill-jvm-opts` caps the daemon heap at `-Xmx1g`. The task fails with:
+### What changed in 2.1.17
 
-```
-java.lang.Exception: fatal exception occurred: java.lang.OutOfMemoryError: Java heap space
-    at coursier.util.Tree.customRender(Tree.scala:59)
-    at coursier.util.Tree.render(Tree.scala:15)
-Caused by: java.lang.OutOfMemoryError: Java heap space
-```
+The BOM support PRs modified `Resolution.scala` and `Dependency.scala` to
+propagate `DependencyManagement` overrides transitively. This changes which
+edges appear in the resolved dependency graph:
 
-Mill currently uses coursier 2.1.25-M25.
+- **Before 2.1.17**: version conflicts are resolved but the graph edges reflect
+  what packages directly declared. A common library like `slf4j-api` might have
+  20 direct dependees recorded.
+- **After 2.1.17**: BOM-managed overrides create additional explicit edges for
+  each package whose version was governed by a BOM. The same `slf4j-api` may
+  now have 50+ dependees recorded, because every package managed by a BOM that
+  transitively depends on `slf4j-api` contributes an explicit edge.
 
-## Regression history
+The forward tree shrinks because deduplication is more aggressive. The
+`dependees` map explodes because there are far more edges.
 
-The bug was introduced in **coursier 2.1.17** (released 2024-11-07).
+### Why this is fatal for `--reverse-tree`
 
-| Version | Reverse tree |
-|---------|-------------|
-| ≤ 2.1.16 | PASS |
-| 2.1.17 | **FAIL** (OOM, exit 3) |
-| 2.1.24 | FAIL |
-| 2.1.25-M25 | FAIL |
+`Tree.recursivePrint` (`Tree.scala:34`) uses an `ancestors: Set[A]` that
+tracks only the current root-to-node path:
 
-The regression was caused by the BOM (Bill of Materials) support added in
-[coursier#3097](https://github.com/coursier/coursier/pull/3097) and
-[coursier#3143](https://github.com/coursier/coursier/pull/3143), which
-introduced `DependencyManagement.{Key,Values}`, propagated dep-mgmt overrides
-transitively, and modified `Resolution.scala` and `Dependency.scala`.
-
-The effect on tree sizes (reduced dep set: slf4j-api + jackson-databind +
-spring-core + spring-boot-starter-web + spark-sql):
-
-| Version | Forward tree lines | Reverse tree |
-|---------|--------------------|--------------|
-| 2.1.16  | 115,314 | 36,724 lines, completes |
-| 2.1.17  |  51,636 | OOM before completion |
-
-The BOM changes make the **forward** tree smaller (better deduplication of
-resolved versions), but they add new BOM-management edges to the dependency
-graph that dramatically increase the fan-out of the `dependees` map used to
-build the reverse tree. With more dependees per node, `Tree.recursivePrint`'s
-path-local cycle detection is insufficient and the reverse tree blows up
-exponentially.
-
-## Root cause
-
-### How `--reverse-tree` / `--inverse` works
-
-`Print.dependencyTree0` calls `ReverseModuleTree.fromDependencyTree`, which
-walks the full forward dependency tree once to build a `dependees` map:
-every module M → the set of modules that directly depend on M.
-
-It then constructs a `Tree[ReverseModuleTree.Node]` whose roots are the
-declared direct dependencies of the module, and whose `children` function
-calls `node.dependees` — the modules that depend on this node — to walk
-upward through the graph toward the root.
-
-### Why the tree explodes
-
-`Tree.recursivePrint` uses a **path-local** `ancestors: Set[A]` to detect
-cycles. It only skips a node that is a literal ancestor on the current
-root-to-leaf path. It does **not** maintain a global visited set, so the
-same module is re-expanded every time it is reached via a different branch.
-
-When a low-level package (`slf4j-api`, `jackson-core`, `spring-core`,
-`netty-*`, etc.) appears as a reverse-tree root — because it is declared as
-an explicit direct dep — and has many dependees in the forward tree, every
-path upward is independently expanded:
-
-```
-slf4j-api
-├─ logback-classic
-│  └─ spring-boot-starter-logging
-│     └─ spring-boot-starter
-│        └─ spring-boot-starter-web   [root → terminates]
-├─ kafka-clients
-│  └─ spring-kafka   [root → terminates]
-├─ flink-slf4j
-│  └─ flink-runtime
-│     └─ flink-streaming-java   [root → terminates]
-...  (dozens more branches, each fully expanded independently)
+```scala
+val unseenElems = elems.filterNot(ancestors.contains)
+// ...
+recursivePrint(children(elem), ancestors + elem, ...)
 ```
 
-With ~20 low-level root packages each having 10–50 dependees, which
-themselves have 5–15 dependees, the tree grows to millions of nodes.
-All rendered strings accumulate in an `ArrayBuffer` before `mkString` is
-called (`Tree.customRender`, `Tree.scala:59`), so the entire expanded tree
-must fit in heap simultaneously.
+This prevents infinite loops through direct cycles, but does **not** prevent
+a node from being visited many times via different branches. In the reverse
+tree, `slf4j-api` (a root because it is an explicit direct dep) has 50+
+dependees; each of those has 10–20 dependees; and so on. Each branch is
+expanded fully and independently, producing an exponential node count.
 
-### Why this dep set is pathological
+All rendered strings accumulate in a single `ArrayBuffer` in
+`Tree.customRender` (`Tree.scala:57`) before `mkString` is called at line 59.
+The entire exponentially-expanded tree must fit in heap simultaneously — there
+is no streaming.
 
-The trigger condition is: **a package appears as a reverse-tree root AND
-has many non-root dependees in the forward tree**.
+### Why this dep set triggers it
 
-This happens in `build.mill` because low-level packages (`slf4j-api`,
-`jackson-core`, `spring-core`, etc.) are declared as explicit `mvnDeps`
-alongside high-level frameworks (`spring-boot-starter-web`, `spark-sql`,
-`flink-streaming-java`) that pull those same packages in transitively.
-The low-level packages become roots *with* many dependees — the worst
-case for the path-local cycle guard.
+The trigger condition is: a package is a **reverse-tree root** (a declared
+direct dep) **and** has many non-root dependees in the forward tree.
 
-In real-world projects the same situation arises naturally: a large
-multi-module build aggregating many framework stacks will have ubiquitous
-transitive packages (especially after 2.1.17 added BOM management edges)
-appearing as roots through version-conflict resolution.
+`build.mill` declares low-level packages (`slf4j-api`, `jackson-core`,
+`spring-core`, `netty-*`, …) as explicit direct deps alongside the high-level
+frameworks (`spring-boot-starter-web`, `spark-sql`, `flink-streaming-java`, …)
+that pull those packages in transitively. The low-level packages become roots
+with many dependees — precisely the worst case for the path-local guard.
+
+In real projects the same situation arises without explicit duplication: a
+large multi-module build that aggregates multiple framework stacks will, after
+2.1.17, have many more BOM-management edges, making ubiquitous transitive
+packages act as dense reverse-tree roots.
+
+---
 
 ## Fix direction
 
-`Tree.recursivePrint` should maintain a **global** visited set in addition
-to the path-local `ancestors` set. When a node has already been visited via
-a different branch it should print an elision marker (e.g.
-`(already shown above)`) rather than re-expanding the full subtree. This is
-the same strategy the forward tree already uses implicitly (via shared
-`DependencyTree` node identity), applied explicitly to the reverse traversal.
+**In coursier (`Tree.recursivePrint`)**: maintain a global `visited` set
+alongside the path-local `ancestors` set. When a node is encountered that has
+already been visited via a different branch, print an elision marker (e.g.
+`(already shown)`) rather than re-expanding. This is the same strategy the
+forward tree uses implicitly via shared `DependencyTree` node identity.
 
-Alternatively (or additionally), `Tree.customRender` should stream lines to
-the output rather than accumulating everything in an `ArrayBuffer[String]`
-before flushing — this turns an OOM into a slow-but-survivable operation and
-makes the problem visible earlier.
+**Secondary (independent)**: `Tree.customRender` accumulates all lines in an
+`ArrayBuffer` before flushing. Streaming lines directly to output would turn
+an OOM into a slow-but-survivable operation and make the problem visible
+earlier, even without the global visited fix.
+
+---
+
+## Mill context
+
+This was originally reported in
+[com-lihaoyi/mill#6823](https://github.com/com-lihaoyi/mill/issues/6823) as
+`mill <module>.showMvnDepsTree --inverse` hanging or OOMing. Mill currently
+ships coursier 2.1.25-M25 and so is affected. The `build.mill` and
+`.mill-jvm-opts` in this repo reproduce it via Mill, but the bug is entirely
+within coursier and reproducible directly with `cs resolve --reverse-tree`.
