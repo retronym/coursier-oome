@@ -101,6 +101,30 @@ a large multi-module build that aggregates many framework stacks will naturally
 have ubiquitous transitive packages appearing as roots through version-conflict
 resolution forcing them into `minDependencies`.
 
+## Regression history
+
+The bug is a regression introduced in **coursier 2.1.17** (released 2024-11-07).
+
+| Version | Result |
+|---------|--------|
+| 2.1.16  | PASS   |
+| 2.1.17  | FAIL (OOM) |
+| 2.1.24  | FAIL   |
+| 2.1.25-M25 (current Mill) | FAIL |
+
+The regression was caused by the BOM (Bill of Materials) support landed in
+[#3097](https://github.com/coursier/coursier/pull/3097) and
+[#3143](https://github.com/coursier/coursier/pull/3143), which added
+`DependencyManagement.{Key,Values}`, propagated dep-mgmt overrides
+transitively, and modified `Resolution.scala` / `Dependency.scala`.
+
+Counterintuitively, the BOM changes make the **forward** tree *smaller*
+(51k lines → 36k lines for a reduced dep set) by better deduplication, but
+they add new BOM-management edges to the dependency graph that dramatically
+increase the fan-out of the `dependees` map used by the reverse tree.
+With more dependees per node, `Tree.recursivePrint`'s path-local cycle
+detection is insufficient and the tree blows up exponentially.
+
 ### Fix direction
 
 `Tree.recursivePrint` should maintain a **global** visited set in addition to the

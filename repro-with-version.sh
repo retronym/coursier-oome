@@ -1,25 +1,46 @@
 #!/usr/bin/env bash
-# Reproduces the showMvnDepsTree --inverse OOM (mill#6823) using the
-# coursier CLI directly. Both Mill and cs share the same Tree.recursivePrint
-# code path, so the exponential reverse-tree expansion affects both.
+# Run the reverse-tree OOM repro with a specific coursier version.
 #
 # Usage:
-#   ./repro-cs.sh              # run with cs on PATH
-#   CS=/path/to/cs ./repro-cs.sh
+#   ./repro-with-version.sh <version>     e.g. 2.1.24 or 2.1.25-M25
 #
-# To cap the JVM heap when using the JVM-based cs launcher (not the native binary):
-#   CS="java -Xmx1g -jar /path/to/coursier.jar" ./repro-cs.sh
+# Downloads coursier-<version>.jar if not already cached in .coursier-jars/,
+# then runs the reverse-tree repro with -Xmx1g.
 #
-# Note: the Homebrew/native cs binary manages its own heap and ignores
-# _JAVA_OPTIONS / JAVA_OPTS. To constrain it, use the JVM-based launcher above.
+# Exit codes:
+#   0  completed without OOM (regression check: not affected)
+#   1  OOM or other failure  (bug present)
 
 set -euo pipefail
-# Default to the JAR-based launcher in this directory so heap can be capped via -Xmx.
-# The native `cs` binary ignores _JAVA_OPTIONS / JAVA_OPTS.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CS="${CS:-java -Xmx1g -XX:+ExitOnOutOfMemoryError -jar "${SCRIPT_DIR}/coursier"}"
 
-# High-level framework deps — each pulls in the low-level ones transitively.
+if [[ $# -lt 1 ]]; then
+  echo "Usage: $0 <coursier-version>" >&2
+  exit 2
+fi
+
+VERSION="$1"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+JAR_DIR="${SCRIPT_DIR}/.coursier-jars"
+JAR="${JAR_DIR}/coursier-${VERSION}.jar"
+
+mkdir -p "${JAR_DIR}"
+
+if [[ ! -f "${JAR}" ]]; then
+  URL="https://github.com/coursier/coursier/releases/download/v${VERSION}/coursier.jar"
+  echo "Downloading coursier ${VERSION} from ${URL} ..."
+  curl -fL --progress-bar -o "${JAR}" "${URL}"
+fi
+
+GC_LOG="${SCRIPT_DIR}/gc-${VERSION}.log"
+# GCTimeLimit=40: OOM if >40% of CPU time is spent in GC (default 98).
+# This triggers GCOverheadLimitExceeded well before heap is fully exhausted,
+# giving the GC log time to record the pressure leading up to failure.
+# -Xlog:gc (no wildcard) avoids shell glob expansion of gc*.
+CS=(java -Xmx1g -XX:+ExitOnOutOfMemoryError
+  -Xlog:gc:file="${GC_LOG}":time,uptime
+  -XX:GCTimeLimit=40
+  -jar "${JAR}")
+
 FRAMEWORK_DEPS=(
   "com.vaadin:vaadin:24.6.6"
   "com.vaadin:vaadin-spring-boot-starter:24.6.6"
@@ -41,11 +62,6 @@ FRAMEWORK_DEPS=(
   "org.hibernate.orm:hibernate-core:6.6.13.Final"
 )
 
-# Low-level deps that are transitively used by all of the above.
-# Declaring them explicitly makes them reverse-tree *roots with many dependees* —
-# the trigger condition for exponential blowup in Tree.recursivePrint.
-# (The path-local `ancestors` set only breaks exact cycles; it doesn't prevent
-# the same node being re-expanded via different branches.)
 LOW_LEVEL_DEPS=(
   "org.slf4j:slf4j-api:2.0.17"
   "org.slf4j:slf4j-simple:2.0.17"
@@ -79,11 +95,12 @@ LOW_LEVEL_DEPS=(
 
 ALL_DEPS=("${FRAMEWORK_DEPS[@]}" "${LOW_LEVEL_DEPS[@]}")
 
-echo "=== Forward tree (--tree) ==="
-echo "Line count:"
-$CS resolve --tree "${ALL_DEPS[@]}" 2>/dev/null | wc -l
-
 echo ""
-echo "=== Reverse tree (--reverse-tree) ==="
-echo "This is the operation that OOMs. Running now..."
-time $CS resolve --reverse-tree "${ALL_DEPS[@]}"
+echo "=== coursier ${VERSION}: reverse tree (--reverse-tree) ==="
+if "${CS[@]}" resolve --reverse-tree "${ALL_DEPS[@]}" > /dev/null 2>&1; then
+  echo "PASS: completed without OOM"
+  exit 0
+else
+  echo "FAIL: OOM or error (exit $?)"
+  exit 1
+fi

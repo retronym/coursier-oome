@@ -1,2 +1,4 @@
 out/
 coursier
+gc-*.log
+.coursier-jars/
