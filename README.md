@@ -6,11 +6,13 @@ when running `mill <module>.showMvnDepsTree --inverse`.
 
 ## Reproducing
 
+### Via Mill
+
 ```
 mill cloud.vaadin.showMvnDepsTree --inverse
 ```
 
-With `.mill-jvm-opts` capping the daemon heap at `-Xmx1g`, the task fails:
+`.mill-jvm-opts` caps the daemon heap at `-Xmx1g`. The task fails with:
 
 ```
 java.lang.Exception: fatal exception occurred: java.lang.OutOfMemoryError: Java heap space
@@ -18,6 +20,23 @@ java.lang.Exception: fatal exception occurred: java.lang.OutOfMemoryError: Java 
     at coursier.util.Tree.render(Tree.scala:15)
 Caused by: java.lang.OutOfMemoryError: Java heap space
 ```
+
+### Via the coursier CLI (`repro-cs.sh`)
+
+The same `Tree.recursivePrint` code path runs inside the coursier CLI, so the
+bug is reproducible without Mill. `repro-cs.sh` uses the JAR-based coursier
+launcher (required because the native `cs` binary ignores `_JAVA_OPTIONS`):
+
+```bash
+# Download the JAR-based launcher (one-time)
+curl -fLo coursier https://github.com/coursier/launchers/raw/master/coursier
+chmod +x coursier
+
+./repro-cs.sh
+```
+
+The script runs the forward tree first (to show the line count) then the reverse
+tree, which OOMs with `-Xmx1g`.
 
 ## Root cause
 
