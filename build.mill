@@ -1,0 +1,63 @@
+import mill.*, javalib.*
+
+// High-level "framework" deps — each pulls in the low-level ones transitively
+val frameworkDeps = Seq(
+  mvn"com.vaadin:vaadin:24.6.6",
+  mvn"com.vaadin:vaadin-spring-boot-starter:24.6.6",
+  mvn"org.springframework.boot:spring-boot-starter-web:3.4.5",
+  mvn"org.springframework.boot:spring-boot-starter-data-jpa:3.4.5",
+  mvn"org.springframework.boot:spring-boot-starter-security:3.4.5",
+  mvn"org.springframework.boot:spring-boot-starter-actuator:3.4.5",
+  mvn"org.springframework.boot:spring-boot-starter-oauth2-client:3.4.5",
+  mvn"org.springframework.cloud:spring-cloud-starter-openfeign:4.2.1",
+  mvn"org.springframework.cloud:spring-cloud-starter-netflix-eureka-client:4.2.1",
+  mvn"org.springframework.cloud:spring-cloud-starter-gateway:4.2.1",
+  mvn"org.springframework.kafka:spring-kafka:3.3.5",
+  mvn"org.apache.spark:spark-sql_2.13:4.1.1",
+  mvn"org.apache.spark:spark-mllib_2.13:4.1.1",
+  mvn"org.apache.spark:spark-streaming_2.13:4.1.1",
+  mvn"org.apache.spark:spark-graphx_2.13:4.1.1",
+  mvn"org.apache.hadoop:hadoop-client:3.4.1",
+  mvn"org.apache.flink:flink-streaming-java:1.20.1",
+  mvn"org.hibernate.orm:hibernate-core:6.6.13.Final",
+)
+
+// Low-level deps that are transitively used by ALL of the above.
+// Declaring them explicitly makes them reverse-tree roots WITH many dependees —
+// that's where the exponential expansion happens.
+val lowLevelDeps = Seq(
+  mvn"org.slf4j:slf4j-api:2.0.17",
+  mvn"org.slf4j:slf4j-simple:2.0.17",
+  mvn"com.fasterxml.jackson.core:jackson-core:2.18.3",
+  mvn"com.fasterxml.jackson.core:jackson-databind:2.18.3",
+  mvn"com.fasterxml.jackson.core:jackson-annotations:2.18.3",
+  mvn"com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.18.3",
+  mvn"com.fasterxml.jackson.module:jackson-module-scala_2.13:2.18.3",
+  mvn"com.google.guava:guava:33.4.8-jre",
+  mvn"commons-io:commons-io:2.19.0",
+  mvn"org.apache.commons:commons-lang3:3.17.0",
+  mvn"org.apache.commons:commons-collections4:4.5.0",
+  mvn"io.netty:netty-all:4.1.121.Final",
+  mvn"io.netty:netty-buffer:4.1.121.Final",
+  mvn"io.netty:netty-codec:4.1.121.Final",
+  mvn"io.netty:netty-handler:4.1.121.Final",
+  mvn"io.netty:netty-transport:4.1.121.Final",
+  mvn"org.springframework:spring-core:6.2.7",
+  mvn"org.springframework:spring-beans:6.2.7",
+  mvn"org.springframework:spring-context:6.2.7",
+  mvn"org.springframework:spring-web:6.2.7",
+  mvn"org.springframework:spring-webmvc:6.2.7",
+  mvn"org.springframework:spring-tx:6.2.7",
+  mvn"org.springframework:spring-aop:6.2.7",
+  mvn"io.micrometer:micrometer-core:1.14.6",
+  mvn"io.micrometer:micrometer-registry-prometheus:1.14.6",
+  mvn"org.apache.httpcomponents.client5:httpclient5:5.4.4",
+  mvn"org.apache.zookeeper:zookeeper:3.9.3",
+  mvn"com.google.protobuf:protobuf-java:4.30.2",
+)
+
+object `cloud` extends Module {
+  object vaadin extends JavaModule {
+    def mvnDeps = frameworkDeps ++ lowLevelDeps
+  }
+}
