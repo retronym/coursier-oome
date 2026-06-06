@@ -31,13 +31,12 @@ if [[ ! -f "${JAR}" ]]; then
   curl -fL --progress-bar -o "${JAR}" "${URL}"
 fi
 
-GC_LOG="${SCRIPT_DIR}/gc-${VERSION}.log"
 # GCTimeLimit=40: OOM if >40% of CPU time is spent in GC (default 98).
-# This triggers GCOverheadLimitExceeded well before heap is fully exhausted,
-# giving the GC log time to record the pressure leading up to failure.
-# -Xlog:gc (no wildcard) avoids shell glob expansion of gc*.
+# This triggers GCOverheadLimitExceeded well before heap is fully exhausted.
+# -Xlog:gc:stderr routes GC output to console without interfering with tree
+# output on stdout, and avoids shell glob expansion of gc*.
 CS=(java -Xmx1g -XX:+ExitOnOutOfMemoryError
-  -Xlog:gc:file="${GC_LOG}":time,uptime
+  -Xlog:gc:stderr:time,uptime
   -XX:GCTimeLimit=40
   -jar "${JAR}")
 
@@ -97,7 +96,8 @@ ALL_DEPS=("${FRAMEWORK_DEPS[@]}" "${LOW_LEVEL_DEPS[@]}")
 
 echo ""
 echo "=== coursier ${VERSION}: reverse tree (--reverse-tree) ==="
-if "${CS[@]}" resolve --reverse-tree "${ALL_DEPS[@]}" > /dev/null 2>&1; then
+echo "+ ${CS[*]} resolve --reverse-tree [${#ALL_DEPS[@]} deps]"
+if "${CS[@]}" resolve --reverse-tree "${ALL_DEPS[@]}" > /dev/null; then
   echo "PASS: completed without OOM"
   exit 0
 else
